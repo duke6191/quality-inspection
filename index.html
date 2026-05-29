@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>示范区开放前品质巡检评分表</title>
   <!-- 腾讯云开发 SDK -->
-  <script src="https://unpkg.com/@cloudbase/js-sdk@1.9.0/dist/cloudbase.full.js"></script>
+  <script src="https://static.cloudbase.net/cloudbase-js-sdk/latest/cloudbase.full.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -749,17 +749,24 @@ let currentFilter = 'all', currentDrawerIdx = null;
 const STORAGE_KEY = 'jc_inspection_records';
 
 // ===== 腾讯云开发 TCB 配置 =====
-// ⚠️ 请将下面的环境ID替换为你自己的腾讯云开发环境ID
 const TCB_ENV = 'd4gismbtc0dbf67d3';
 let db = null, cloudRecords = [], cloudReady = false;
 
 // 初始化 TCB
 function initTCB() {
   try {
-    const app = cloudbase.init({ env: TCB_ENV });
+    const app = cloudbase.init({ env: TCB_ENV, region: 'ap-guangzhou' });
     db = app.database();
     cloudReady = true;
-    console.log('TCB 初始化成功');
+    console.log('TCB 初始化成功, env:', TCB_ENV);
+    // 匿名登录（必须登录后才能操作数据库）
+    app.auth({ persistence: 'local' }).anonymousAuthProvider().signIn().then(() => {
+      console.log('匿名登录成功');
+      cloudReady = true;
+    }).catch(e => {
+      console.warn('匿名登录失败，尝试仅本地存储', e);
+      cloudReady = false;
+    });
   } catch(e) {
     console.warn('TCB 初始化失败，使用本地存储', e);
     cloudReady = false;
@@ -795,7 +802,6 @@ async function cloudDelete(docId) {
 async function cloudClearAll() {
   if (!cloudReady) return;
   try {
-    // 逐条删除（TCB 无批量删除 API）
     const res = await db.collection('records').limit(1000).get();
     const dels = res.data.map(r => db.collection('records').doc(r._id).remove());
     await Promise.all(dels);
