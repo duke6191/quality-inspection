@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>示范区开放前品质巡检评分表</title>
+  <!-- 腾讯云开发 SDK -->
+  <script src="https://unpkg.com/@cloudbase/js-sdk@1.9.0/dist/cloudbase.full.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -656,8 +658,7 @@
 
 <!-- 底部操作栏 -->
 <div class="footer-bar">
-  <button class="btn-reset" onclick="resetAll()">重置</button>
-  <button class="btn-submit" onclick="submitForm()">提交评分</button>
+  <button class="btn-submit" onclick="submitForm()" style="width:100%;">提交评分</button>
 </div>
 </div><!-- /page-form -->
 
@@ -709,6 +710,7 @@
       <button class="filter-btn" onclick="setFilter('good',this)">良好</button>
       <button class="filter-btn" onclick="setFilter('pass',this)">合格</button>
       <button class="filter-btn" onclick="setFilter('fail',this)">不合格</button>
+      <button class="filter-btn" style="margin-left:auto;background:#e53935;color:#fff;border-color:#e53935;" onclick="clearAllData()">🗑 清除全部数据</button>
     </div>
     <div id="historyList"></div>
   </div>
@@ -746,6 +748,61 @@ const scores = {}, accepts = {};
 let currentFilter = 'all', currentDrawerIdx = null;
 const STORAGE_KEY = 'jc_inspection_records';
 
+// ===== 腾讯云开发 TCB 配置 =====
+// ⚠️ 请将下面的环境ID替换为你自己的腾讯云开发环境ID
+const TCB_ENV = 'd4gismbtc0dbf67d3';
+let db = null, cloudRecords = [], cloudReady = false;
+
+// 初始化 TCB
+function initTCB() {
+  try {
+    const app = cloudbase.init({ env: TCB_ENV });
+    db = app.database();
+    cloudReady = true;
+    console.log('TCB 初始化成功');
+  } catch(e) {
+    console.warn('TCB 初始化失败，使用本地存储', e);
+    cloudReady = false;
+  }
+}
+
+// ===== 云端数据操作 =====
+async function cloudSave(record) {
+  if (!cloudReady) return;
+  try {
+    await db.collection('records').add({ ...record, _createdAt: new Date() });
+    console.log('云端保存成功');
+  } catch(e) { console.warn('云端保存失败', e); }
+}
+
+async function cloudFetch() {
+  if (!cloudReady) return [];
+  try {
+    const res = await db.collection('records').orderBy('id','desc').limit(1000).get();
+    console.log('云端拉取成功，共', res.data.length, '条');
+    return res.data;
+  } catch(e) { console.warn('云端拉取失败', e); return []; }
+}
+
+async function cloudDelete(docId) {
+  if (!cloudReady) return;
+  try {
+    await db.collection('records').doc(docId).remove();
+    console.log('云端删除成功');
+  } catch(e) { console.warn('云端删除失败', e); }
+}
+
+async function cloudClearAll() {
+  if (!cloudReady) return;
+  try {
+    // 逐条删除（TCB 无批量删除 API）
+    const res = await db.collection('records').limit(1000).get();
+    const dels = res.data.map(r => db.collection('records').doc(r._id).remove());
+    await Promise.all(dels);
+    console.log('云端清空成功');
+  } catch(e) { console.warn('云端清空失败', e); }
+}
+
 /* ========== Tab 切换 ========== */
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active', (i===0&&tab==='form')||(i===1&&tab==='stats')));
@@ -762,6 +819,7 @@ function switchTab(tab) {
 function init() {
   const d = new Date();
   document.getElementById('reviewDate').textContent = d.getFullYear()+'年'+(d.getMonth()+1)+'月'+d.getDate()+'日';
+  initTCB();
 }
 
 function onSlider(key, val) {
@@ -817,7 +875,6 @@ function updateProgress() {
 }
 
 function resetAll() {
-  if (!confirm('确认重置所有评分？')) return;
   ALL_ITEMS.forEach(k=>{
     delete scores[k]; delete accepts[k];
     const sl=document.getElementById('slider_'+k); if(sl){sl.value=0;sl.style.removeProperty('--pct');}
@@ -835,8 +892,20 @@ function resetAll() {
   updateProgress();
 }
 
+/* ========== 清除全部统计数据 ========== */
+async function clearAllData() {
+  const pwd = prompt('请输入重置密码：');
+  if (pwd === null) return;
+  if (pwd !== 'zhzd001') { showModal('❌','密码错误','重置密码不正确，请确认后重试。'); return; }
+  localStorage.removeItem(STORAGE_KEY);
+  await cloudClearAll();
+  cloudRecords = [];
+  renderStats();
+  showModal('✅','清除成功','所有历史评分记录已清除（含云端）。');
+}
+
 /* ========== 提交 ========== */
-function submitForm() {
+async function submitForm() {
   const unfilled = ALL_ITEMS.filter(k=>scores[k]===undefined);
   if (unfilled.length>0){ showModal('⚠️','评分未完成','还有 '+unfilled.length+' 项未评分，请完成所有评分后再提交。'); return; }
   let total=0;
@@ -862,23 +931,58 @@ function submitForm() {
     const el=document.getElementById('leader_'+k); if(el) record.leaders[k]=el.value;
   });
 
-  saveRecord(record);
-  showModal('✅','提交成功！','综合加权得分：'+v.toFixed(1)+' 分\n评定等级：'+level+'\n\n记录已保存，可在「统计汇总」页查看。', ()=>{ resetAll(); switchTab('stats'); });
+  // 同时保存本地和云端
+  saveRecordLocal(record);
+  await cloudSave(record);
+
+  showModal('✅','提交成功！','综合加权得分：'+v.toFixed(1)+' 分\n评定等级：'+level+'\n\n记录已保存至云端，所有人可查看汇总。', ()=>{ resetAll(); switchTab('stats'); });
 }
 
-/* ========== 本地存储 ========== */
-function getRecords() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); } catch(e){ return []; } }
-function saveRecord(r) { const arr=getRecords(); arr.unshift(r); localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }
-function deleteRecord() {
+/* ========== 本地存储（兼容） ========== */
+function getRecordsLocal() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); } catch(e){ return []; } }
+function saveRecordLocal(r) { const arr=getRecordsLocal(); arr.unshift(r); localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }
+
+/* ========== 获取合并记录（云端优先 + 本地补充） ========== */
+async function getAllRecords() {
+  // 从云端拉取
+  const cloud = await cloudFetch();
+  if (cloud.length > 0) {
+    cloudRecords = cloud.map(r => ({
+      _id: r._id,
+      id: r.id,
+      time: r.time,
+      reviewer: r.reviewer,
+      total: r.total,
+      level: r.level,
+      scores: r.scores || {},
+      accepts: r.accepts || {},
+      improvements: r.improvements || {},
+      leaders: r.leaders || {}
+    }));
+    return cloudRecords;
+  }
+  // 云端无数据则用本地
+  cloudRecords = getRecordsLocal();
+  return cloudRecords;
+}
+
+/* ========== 删除记录 ========== */
+async function deleteRecord() {
   if (!confirm('确认删除此条记录？')) return;
-  const arr = getRecords().filter((_,i)=>i!==currentDrawerIdx);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-  closeDrawer(); renderStats();
+  const r = cloudRecords[currentDrawerIdx];
+  if (r && r._id) {
+    await cloudDelete(r._id);
+  }
+  // 同步删除本地
+  const local = getRecordsLocal().filter(a => a.id !== r.id);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(local));
+  closeDrawer();
+  await renderStats();
 }
 
 /* ========== 统计渲染 ========== */
-function renderStats() {
-  const all = getRecords();
+async function renderStats() {
+  const all = await getAllRecords();
   const filtered = currentFilter==='all' ? all : all.filter(r=>getLevel(r.total)===currentFilter);
 
   // KPI
@@ -901,7 +1005,7 @@ function renderStats() {
 
   renderBarChart(all);
   renderRadar(all);
-  renderHistory(filtered);
+  renderHistory(filtered, all);
 }
 
 function getLevel(v) { return v>=90?'excellent':v>=80?'good':v>=60?'pass':'fail'; }
@@ -978,10 +1082,9 @@ function renderRadar(all) {
 }
 
 /* ===== 历史列表 ===== */
-function renderHistory(filtered) {
+function renderHistory(filtered, all) {
   const el = document.getElementById('historyList');
   if (!filtered.length){ el.innerHTML='<div class="empty-tip"><div class="icon">📋</div>暂无记录</div>'; return; }
-  const all = getRecords();
   el.innerHTML = filtered.map(r=>{
     const realIdx = all.findIndex(a=>a.id===r.id);
     const lv = getLevel(r.total);
@@ -1000,13 +1103,13 @@ function renderHistory(filtered) {
 }
 
 /* ===== 筛选 ===== */
-function setFilter(f, el) {
+async function setFilter(f, el) {
   currentFilter = f;
   document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
-  const all = getRecords();
+  const all = await getAllRecords();
   const filtered = f==='all'?all:all.filter(r=>getLevel(r.total)===f);
-  renderHistory(filtered);
+  renderHistory(filtered, all);
 }
 
 /* ===== 抽屉详情 ===== */
@@ -1014,15 +1117,14 @@ const ACCEPT_MAP = {pass:'通过',rectify:'整改后通过',recheck:'整改后�
 const ACCEPT_CLS = {pass:'da-pass',rectify:'da-rectify',recheck:'da-recheck'};
 
 function openDrawer(idx) {
-  const all = getRecords();
-  const r = all[idx]; if (!r) return;
+  const r = cloudRecords[idx]; if (!r) return;
   currentDrawerIdx = idx;
   document.getElementById('drawerTitle').textContent = r.time+' · '+r.reviewer;
   let html = `<div class="drawer-score-row"><span class="drawer-score-key" style="font-weight:700;">综合得分</span><span class="drawer-score-val" style="font-size:20px;">${r.total.toFixed(1)} <small style="font-size:12px;color:#888;">${getLevelCN(r.total)}</small></span></div>`;
   ALL_ITEMS.forEach(k=>{
-    const acc = r.accepts[k];
+    const acc = r.accepts && r.accepts[k];
     const accHtml = acc ? `<span class="drawer-accept ${ACCEPT_CLS[acc]||''}">${ACCEPT_MAP[acc]||acc}</span>` : '';
-    const imp = r.improvements[k];
+    const imp = r.improvements && r.improvements[k];
     html += `<div class="drawer-score-row">
       <span class="drawer-score-key">${DEPT_NAMES[k]}</span>
       <span class="drawer-score-val">${r.scores[k]} 分${accHtml}</span>
